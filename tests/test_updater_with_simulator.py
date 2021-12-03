@@ -11,13 +11,18 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from typing import Optional, Tuple
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from tests import utils
 from tests.repository_simulator import RepositorySimulator
 from tuf.api.metadata import SPECIFICATION_VERSION, Targets
-from tuf.exceptions import BadVersionNumberError, UnsignedMetadataError
+from tuf.exceptions import (
+    BadVersionNumberError,
+    ExpiredMetadataError,
+    UnsignedMetadataError,
+)
 from tuf.ngclient import Updater
 
 
@@ -241,6 +246,7 @@ class TestUpdater(unittest.TestCase):
 
         # Run refresh, top-level roles are loaded
         updater = self._run_refresh()
+
         # Clean up calls to open during refresh()
         wrapped_open.reset_mock()
 
@@ -253,6 +259,54 @@ class TestUpdater(unittest.TestCase):
         # Second call to get_targetinfo, all metadata is already loaded
         updater.get_targetinfo("somepath")
         wrapped_open.assert_not_called()
+
+    @patch.object(builtins, "open", wraps=builtins.open)
+    def test_expired_metadata(self, wrapped_open: MagicMock) -> None:
+        updater = self._run_refresh()
+
+        past_datetime = datetime.utcnow().replace(microsecond=0) - timedelta(
+            days=5
+        )
+
+        self.sim.timestamp.expires = past_datetime
+        self.sim.snapshot.expires = past_datetime
+        self.sim.targets.expires = past_datetime
+
+        # Add targets to repository
+        self.sim.targets.version += 1
+        self.sim.add_target("targets", b"some content", self.targets_dir)
+        self.sim.update_snapshot()
+
+        # Clean up calls to open during refresh()
+        wrapped_open.reset_mock()
+
+        # Make a successful update of valid metadata which stores it in cache
+        updater.get_targetinfo(self.targets_dir)
+
+        # Create a new updater and perform a second update while
+        # the metadata is already stored in cache (metadata dir)
+        updater = Updater(
+            self.metadata_dir,
+            "https://example.com/metadata/",
+            self.targets_dir,
+            "https://example.com/targets/",
+            self.sim,
+        )
+
+        with self.assertRaises(ExpiredMetadataError):
+            updater.get_targetinfo(self.targets_dir)
+
+        # Test that an expired timestamp/snapshot/targets
+        # when loaded from cache is not stored as final
+        # but is used to verify the new timestamp
+        wrapped_open.assert_has_calls(
+            [
+                call(os.path.join(self.metadata_dir, "root.json"), "rb"),
+                call(os.path.join(self.metadata_dir, "timestamp.json"), "rb"),
+            ]
+        )
+
+        wrapped_open.reset_mock()
 
 
 if __name__ == "__main__":
