@@ -265,6 +265,9 @@ class TestUpdater(unittest.TestCase):
     def test_expired_metadata(self, wrapped_open: MagicMock) -> None:
         # Test that expired timestamp/snapshot can be used to verify the next
         # version of timestamp/snapshot respectively.
+        # If there is an expired local targets it won't be verified and the
+        # updater will try to fetch and verify the next version without using
+        # any information from the old expired targets file.
 
         # Make a successful update of valid metadata which stores it in cache
         self._run_refresh()
@@ -282,6 +285,7 @@ class TestUpdater(unittest.TestCase):
         )
         self.sim.timestamp.expires = past_datetime
         self.sim.snapshot.expires = past_datetime
+        self.sim.targets.expires = past_datetime
 
         # Serializer is used to serialize JSON in a human readable format.
         seriazer = JSONSerializer()
@@ -294,6 +298,9 @@ class TestUpdater(unittest.TestCase):
         # Make version 2 of the roles valid by using a future expiry date
         self.sim.timestamp.expires = future_datetime
         self.sim.snapshot.expires = future_datetime
+        self.sim.targets.expires = future_datetime
+
+        self.sim.targets.version += 1
         self.sim.update_snapshot()
 
         # Clean up calls to open during refresh()
@@ -316,7 +323,7 @@ class TestUpdater(unittest.TestCase):
 
         # Assert that the final version of timestamp/snapshot is version 2 with
         # a future expiry date.
-        for role in ["timestamp", "snapshot"]:
+        for role in ["timestamp", "snapshot", "targets"]:
             md = Metadata.from_file(f"{self.metadata_dir}/{role}.json")
             self.assertEqual(md.signed.version, 2)
             self.assertEqual(md.signed.expires, future_datetime)
