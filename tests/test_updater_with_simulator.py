@@ -17,12 +17,13 @@ from unittest.mock import MagicMock, call, patch
 
 from tests import utils
 from tests.repository_simulator import RepositorySimulator
-from tuf.api.metadata import SPECIFICATION_VERSION, Targets
-from tuf.exceptions import (
-    BadVersionNumberError,
-    ExpiredMetadataError,
-    UnsignedMetadataError,
+from tuf.api.metadata import (
+    SPECIFICATION_VERSION,
+    Metadata,
+    Targets,
 )
+from tuf.api.serialization.json import JSONSerializer
+from tuf.exceptions import BadVersionNumberError, UnsignedMetadataError
 from tuf.ngclient import Updater
 
 
@@ -262,49 +263,63 @@ class TestUpdater(unittest.TestCase):
 
     @patch.object(builtins, "open", wraps=builtins.open)
     def test_expired_metadata(self, wrapped_open: MagicMock) -> None:
-        updater = self._run_refresh()
+        # Test that expired timestamp/snapshot can be used to verify the next
+        # version of timestamp/snapshot respectively.
+
+        # Make a successful update of valid metadata which stores it in cache
+        self._run_refresh()
 
         past_datetime = datetime.utcnow().replace(microsecond=0) - timedelta(
             days=5
         )
 
+        # Store the future_datetime for future reference
+        future_datetime = self.sim.timestamp.expires
+
+        # Make version 1 stored metadata in the simulator expired.
+        past_datetime = datetime.utcnow().replace(microsecond=0) - timedelta(
+            weeks=52
+        )
         self.sim.timestamp.expires = past_datetime
         self.sim.snapshot.expires = past_datetime
-        self.sim.targets.expires = past_datetime
 
-        # Add targets to repository
-        self.sim.targets.version += 1
-        self.sim.add_target("targets", b"some content", self.targets_dir)
+        # Serializer is used to serialize JSON in a human readable format.
+        seriazer = JSONSerializer()
+
+        # Replace current version 1 roles with expired ones.
+        for role in ["timestamp", "snapshot"]:
+            md = Metadata.from_bytes(self.sim.fetch_metadata(role))
+            md.to_file(f"{self.metadata_dir}/{role}.json", seriazer)
+
+        # Make version 2 of the roles valid by using a future expiry date
+        self.sim.timestamp.expires = future_datetime
+        self.sim.snapshot.expires = future_datetime
         self.sim.update_snapshot()
 
         # Clean up calls to open during refresh()
         wrapped_open.reset_mock()
 
-        # Make a successful update of valid metadata which stores it in cache
-        updater.get_targetinfo(self.targets_dir)
-
         # Create a new updater and perform a second update while
         # the metadata is already stored in cache (metadata dir)
-        updater = Updater(
-            self.metadata_dir,
-            "https://example.com/metadata/",
-            self.targets_dir,
-            "https://example.com/targets/",
-            self.sim,
-        )
+        self._run_refresh()
 
-        with self.assertRaises(ExpiredMetadataError):
-            updater.get_targetinfo(self.targets_dir)
-
-        # Test that an expired timestamp/snapshot/targets
-        # when loaded from cache is not stored as final
-        # but is used to verify the new timestamp
+        # Test that an expired timestamp/snapshot when loaded from cache is not
+        # stored as final but is used to verify the new timestamp
         wrapped_open.assert_has_calls(
             [
                 call(os.path.join(self.metadata_dir, "root.json"), "rb"),
                 call(os.path.join(self.metadata_dir, "timestamp.json"), "rb"),
+                call(os.path.join(self.metadata_dir, "snapshot.json"), "rb"),
+                call(os.path.join(self.metadata_dir, "targets.json"), "rb"),
             ]
         )
+
+        # Assert that the final version of timestamp/snapshot is version 2 with
+        # a future expiry date.
+        for role in ["timestamp", "snapshot"]:
+            md = Metadata.from_file(f"{self.metadata_dir}/{role}.json")
+            self.assertEqual(md.signed.version, 2)
+            self.assertEqual(md.signed.expires, future_datetime)
 
         wrapped_open.reset_mock()
 
